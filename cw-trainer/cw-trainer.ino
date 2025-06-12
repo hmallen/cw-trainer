@@ -84,6 +84,8 @@ bool keyPressed = false;
 bool decoderEnabled = true;
 bool kochModeEnabled = false;    
 bool useExternalAudio = false;   // false = sidetone, true = radio input
+bool espConnected = false;
+unsigned long lastWiFiUpdate = 0;
 unsigned long lastFreqUpdate = 0;
 unsigned long lastVolumeUpdate = 0;
 unsigned long lastDisplayUpdate = 0;
@@ -1251,135 +1253,6 @@ void saveSettings() {
   sessionStartTime = millis();  // Reset session timer
 }
 
-void initializeWiFi() {
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi");
-  
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
-  }
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi connected!");
-    Serial.println("IP address: " + WiFi.localIP().toString());
-    setupWebServer();
-  } else {
-    Serial.println("\nWiFi connection failed. Continuing without web interface.");
-  }
-}
-
-void setupWebServer() {
-  server.on("/", handleRoot);
-  server.on("/stats", handleStatsPage);
-  server.on("/control", handleControlPage);
-  server.on("/api/stats", handleAPIStats);
-  server.on("/api/control", HTTP_POST, handleAPIControl);
-  server.on("/api/lesson", HTTP_POST, handleAPILesson);
-  
-  server.begin();
-  Serial.println("Web server started");
-}
-
-void handleRoot() {
-  String html = "<!DOCTYPE html><html><head><title>CW Trainer</title>";
-  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<style>body{font-family:Arial,sans-serif;margin:20px;background:#1a1a1a;color:#fff;}";
-  html += ".container{max-width:800px;margin:0 auto;}.card{background:#333;padding:20px;margin:10px 0;border-radius:8px;}";
-  html += ".button{background:#007bff;color:white;padding:10px 20px;border:none;border-radius:4px;cursor:pointer;margin:5px;}";
-  html += ".button:hover{background:#0056b3;}.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;}";
-  html += "</style></head><body><div class='container'>";
-  html += "<h1>CW Ultimate Trainer</h1>";
-  
-  html += "<div class='card'><h2>Current Status</h2>";
-  html += "<p>Koch Lesson: " + String(kochLesson) + "/40</p>";
-  html += "<p>Characters: " + kochCharSet + "</p>";
-  html += "<p>Speed: " + String(kochSpeed) + "/" + String(kochEffectiveSpeed) + " WPM</p>";
-  html += "<p>Frequency: " + String(sidetoneFreq, 0) + " Hz</p>";
-  html += "<p>Decoder: " + String(decoderEnabled ? "ON" : "OFF") + "</p>";
-  html += "</div>";
-  
-  html += "<div class='card'><h2>Quick Controls</h2>";
-  html += "<button class='button' onclick='startLesson()'>Start Koch Lesson</button>";
-  html += "<button class='button' onclick='generateCallsigns()'>Callsign Practice</button>";
-  html += "<button class='button' onclick='startQSO()'>QSO Simulation</button>";
-  html += "<button class='button' onclick='toggleDecoder()'>Toggle Decoder</button>";
-  html += "</div>";
-  
-  html += "<div class='card'><h2>Statistics</h2>";
-  html += "<div class='stats'>";
-  html += "<div>Sessions: " + String(stats.sessionsCompleted) + "</div>";
-  html += "<div>Best WPM: " + String(stats.bestWPM, 1) + "</div>";
-  html += "<div>Characters: " + String(stats.charactersDecoded) + "</div>";
-  html += "<div>Accuracy: " + String(stats.averageAccuracy, 1) + "%</div>";
-  html += "</div></div>";
-  
-  html += "</div>";
-  html += "<script>";
-  html += "function startLesson(){fetch('/api/lesson',{method:'POST',body:'start'});}";
-  html += "function generateCallsigns(){fetch('/api/lesson',{method:'POST',body:'callsign'});}";
-  html += "function startQSO(){fetch('/api/lesson',{method:'POST',body:'qso'});}";
-  html += "function toggleDecoder(){fetch('/api/control',{method:'POST',body:'decoder'});}";
-  html += "setInterval(()=>location.reload(),30000);";  // Auto-refresh every 30 seconds
-  html += "</script></body></html>";
-  
-  server.send(200, "text/html", html);
-}
-
-void handleStatsPage() {
-  String json = "{";
-  json += "\"sessions\":" + String(stats.sessionsCompleted) + ",";
-  json += "\"characters\":" + String(stats.charactersDecoded) + ",";
-  json += "\"bestWPM\":" + String(stats.bestWPM) + ",";
-  json += "\"accuracy\":" + String(stats.averageAccuracy) + ",";
-  json += "\"lesson\":" + String(kochLesson) + ",";
-  json += "\"trainingHours\":" + String(stats.totalTrainingMinutes / 60.0);
-  json += "}";
-  
-  server.send(200, "application/json", json);
-}
-
-void handleControlPage() {
-  server.send(200, "text/plain", "Control API endpoint");
-}
-
-void handleAPIStats() {
-  handleStatsPage();
-}
-
-void handleAPIControl() {
-  String command = server.arg("plain");
-  
-  if (command == "decoder") {
-    decoderEnabled = !decoderEnabled;
-    server.send(200, "text/plain", "Decoder " + String(decoderEnabled ? "enabled" : "disabled"));
-  } else {
-    server.send(400, "text/plain", "Unknown command");
-  }
-}
-
-void handleAPILesson() {
-  String lessonType = server.arg("plain");
-  
-  if (lessonType == "start") {
-    kochModeEnabled = true;
-    currentPracticeMode = KOCH_TRAINING;
-    startKochLesson();
-    server.send(200, "text/plain", "Koch lesson started");
-  } else if (lessonType == "callsign") {
-    currentPracticeMode = CALLSIGN_PRACTICE;
-    generateCallsignLesson();
-    server.send(200, "text/plain", "Callsign practice started");
-  } else if (lessonType == "qso") {
-    currentPracticeMode = QSO_SIMULATION;
-    startQSOSimulation();
-    server.send(200, "text/plain", "QSO simulation started");
-  } else {
-    server.send(400, "text/plain", "Unknown lesson type");
-  }
-}
 
 void updateWaveform() {
   mixer1.gain(0, 0);
