@@ -7,6 +7,8 @@
 #include <EEPROM.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_GFX.h>
+#include "trainer_protocol.h"
+#include "trainer_constants.h"
 
 // Display setup
 #define SCREEN_WIDTH 128
@@ -14,52 +16,59 @@
 #define OLED_RESET -1
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
+// Forward declarations for features not yet implemented (prevent compile errors)
+void startQSOSimulation();
+void continueQSOSimulation();
+void displayDetailedStats();
+
 bool wifiEnabled = true;  // Set to true if you add WiFi module
 
 // Audio objects for generation
-AudioSynthWaveformSine     sine1;
-AudioSynthWaveform         waveform1;
-AudioMixer4                mixer1;
-AudioEffectEnvelope        envelope1;
+AudioSynthWaveformSine sine1;
+AudioSynthWaveform waveform1;
+AudioMixer4 mixer1;
+AudioEffectEnvelope envelope1;
 
 // Audio objects for decoding and input
-AudioAnalyzeToneDetect     toneDetect1;
-AudioInputI2S              audioInput;     // For radio input
-AudioMixer4                decodeMixer;
-AudioAnalyzeFFT1024        fft1024;        // For spectrum analysis
-AudioEffectMultiply        agc;            // Simple AGC
+AudioAnalyzeToneDetect toneDetect1;
+AudioInputI2S audioInput;  // For radio input
+AudioMixer4 decodeMixer;
+AudioAnalyzeFFT1024 fft1024;  // For spectrum analysis
+AudioEffectMultiply agc;      // Simple AGC
 
 // Audio outputs
-AudioOutputAnalog          dac1;
-AudioOutputI2S             i2s1;
+AudioOutputAnalog dac1;
+AudioOutputI2S i2s1;
 
 // Audio connections - Generation path
-AudioConnection            patchCord1(sine1, 0, mixer1, 0);
-AudioConnection            patchCord2(waveform1, 0, mixer1, 1);
-AudioConnection            patchCord3(mixer1, envelope1);
-AudioConnection            patchCord4(envelope1, 0, dac1, 0);
-AudioConnection            patchCord5(envelope1, 0, i2s1, 0);
-AudioConnection            patchCord6(envelope1, 0, i2s1, 1);
+AudioConnection patchCord1(sine1, 0, mixer1, 0);
+AudioConnection patchCord2(waveform1, 0, mixer1, 1);
+AudioConnection patchCord3(mixer1, envelope1);
+AudioConnection patchCord4(envelope1, 0, dac1, 0);
+AudioConnection patchCord5(envelope1, 0, i2s1, 0);
+AudioConnection patchCord6(envelope1, 0, i2s1, 1);
 
 // Audio connections - Decoding path
-AudioConnection            patchCord7(envelope1, 0, decodeMixer, 0);      // Internal sidetone
-AudioConnection            patchCord8(audioInput, 0, decodeMixer, 1);     // External audio
-AudioConnection            patchCord9(decodeMixer, toneDetect1);
-AudioConnection            patchCord10(decodeMixer, 0, fft1024, 0);       // Spectrum analysis
+AudioConnection patchCord7(envelope1, 0, decodeMixer, 0);   // Internal sidetone
+AudioConnection patchCord8(audioInput, 0, decodeMixer, 1);  // External audio
+AudioConnection patchCord9(decodeMixer, toneDetect1);
+AudioConnection patchCord10(decodeMixer, 0, fft1024, 0);  // Spectrum analysis
 
-AudioControlSGTL5000       sgtl5000_1;
+AudioControlSGTL5000 sgtl5000_1;
 
 // Pin definitions
-const int KEY_PIN = 2;           
-const int FREQ_POT = A0;         
-const int VOLUME_POT = A1;       
-const int SPEED_POT = A2;        // Koch speed control
-const int WAVEFORM_BTN = 3;      
-const int OUTPUT_SELECT_BTN = 4; 
+const int KEY_PIN = 2;
+const int FREQ_POT = A0;
+const int VOLUME_POT = A1;
+const int SPEED_POT = A2;  // Koch speed control
+const int WAVEFORM_BTN = 3;
+const int OUTPUT_SELECT_BTN = 4;
 const int DECODER_TOGGLE_BTN = 5;
-const int KOCH_MODE_BTN = 6;     
-const int KOCH_NEXT_BTN = 7;     
+const int KOCH_MODE_BTN = 6;
+const int KOCH_NEXT_BTN = 7;
 const int INPUT_SELECT_BTN = 8;  // Toggle internal/external audio
+const int WIFI_RST_PIN = 22;     // ESP32 EN reset control
+const int WIFI_READY_PIN = 23;   // ESP32 ready signal (low = ready)
 const int MENU_BTN = 9;          // Menu navigation
 const int SELECT_BTN = 10;       // Menu selection
 const int AUDIO_INPUT_PIN = A3;  // External audio level
@@ -76,35 +85,51 @@ Bounce menuButton = Bounce();
 Bounce selectButton = Bounce();
 
 // Configuration variables
-float sidetoneFreq = 600.0;      
-float volume = 0.5;              
-int currentWaveform = 0;         
-bool useHeadphones = true;       
+float sidetoneFreq = 600.0;
+float volume = 0.5;
+int currentWaveform = 0;
+bool useHeadphones = true;
 bool keyPressed = false;
 bool decoderEnabled = true;
-bool kochModeEnabled = false;    
-bool useExternalAudio = false;   // false = sidetone, true = radio input
+bool kochModeEnabled = false;
+bool useExternalAudio = false;  // false = sidetone, true = radio input
 bool espConnected = false;
-unsigned long lastWiFiUpdate = 0;
+unsigned long lastPingTime = 0;
+const unsigned long PING_INTERVAL = 5000;  // 1 second ping
+unsigned long lastWiFiHeartbeat = 0;
+// Event-driven status cache
+unsigned long lastStatusSentTime = 0;
+String lastStatusSent = "";
+const unsigned long STATUS_KEEPALIVE_INTERVAL = 30000;  // send at least every 30 s
+
 unsigned long lastFreqUpdate = 0;
 unsigned long lastVolumeUpdate = 0;
 unsigned long lastDisplayUpdate = 0;
 
 // Menu system
-enum MenuMode { MAIN_SCREEN, KOCH_MENU, PRACTICE_MENU, SETTINGS_MENU, STATS_MENU, QSO_MENU };
+enum MenuMode { MAIN_SCREEN,
+                KOCH_MENU,
+                PRACTICE_MENU,
+                SETTINGS_MENU,
+                STATS_MENU,
+                QSO_MENU };
 MenuMode currentMenu = MAIN_SCREEN;
 int menuSelection = 0;
 bool inMenu = false;
 
 // Practice modes
-enum PracticeMode { KOCH_TRAINING, CALLSIGN_PRACTICE, QSO_SIMULATION, CONTEST_MODE, CUSTOM_LESSON };
+enum PracticeMode { KOCH_TRAINING,
+                    CALLSIGN_PRACTICE,
+                    QSO_SIMULATION,
+                    CONTEST_MODE,
+                    CUSTOM_LESSON };
 PracticeMode currentPracticeMode = KOCH_TRAINING;
 
 // Envelope settings
-const float ATTACK_TIME = 5.0;   
-const float DECAY_TIME = 0.0;    
-const float SUSTAIN_LEVEL = 1.0; 
-const float RELEASE_TIME = 8.0;  
+const float ATTACK_TIME = 5.0;
+const float DECAY_TIME = 0.0;
+const float SUSTAIN_LEVEL = 1.0;
+const float RELEASE_TIME = 8.0;
 
 // CW Decoder variables
 unsigned long keyDownTime = 0;
@@ -117,11 +142,11 @@ unsigned long lastCharacterTime = 0;
 unsigned long lastWordTime = 0;
 
 // Timing
-float ditLength = 100;           
-float dahThreshold = 200;        
-float charSpaceThreshold = 300;  
-float wordSpaceThreshold = 700;  
-const float TONE_THRESHOLD = 0.1; 
+float ditLength = 100;
+float dahThreshold = 200;
+float charSpaceThreshold = 300;
+float wordSpaceThreshold = 700;
+const float TONE_THRESHOLD = 0.1;
 
 // Statistics (stored in EEPROM)
 struct TrainingStats {
@@ -144,27 +169,27 @@ unsigned long sessionStartTime;
 float currentWPM = 0;
 
 // Koch Method Variables
-int kochLesson = 1;              
-String kochCharSet = "";         
-int kochSpeed = 20;              
-int kochEffectiveSpeed = 13;     
-String kochSentText = "";        
-String kochReceivedText = "";    
-int kochCharIndex = 0;           
-unsigned long kochSendTimer = 0; 
-bool kochSending = false;        
-bool kochListening = false;      
-int kochCorrect = 0;             
-int kochTotal = 0;               
-float kochAccuracy = 0.0;        
+int kochLesson = 1;
+String kochCharSet = "";
+int kochSpeed = 20;
+int kochEffectiveSpeed = 13;
+String kochSentText = "";
+String kochReceivedText = "";
+int kochCharIndex = 0;
+unsigned long kochSendTimer = 0;
+bool kochSending = false;
+bool kochListening = false;
+int kochCorrect = 0;
+int kochTotal = 0;
+float kochAccuracy = 0.0;
 
 // Callsign practice
-String callsignPrefixes[] = {"K", "W", "N", "AA", "AB", "AC", "AD", "AE", "AF", "AG", "AH", "AI", "AJ", "AK", "AL", "VE", "VK", "G", "DL", "JA", "HL", "UA"};
-String callsignSuffixes[] = {"A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z"};
+// RAM-hungry arrays replaced with flash-resident tables in trainer_constants.h/.cpp
+
 
 // QSO simulation data
-String qsoExchanges[] = {"CQ CQ DE ", " K", " TU 73", "599 ", "5NN ", "QTH ", "NAME ", "AGE ", "PWR ", "ANT "};
-String contestExchanges[] = {"001 ", "002 ", "CA", "NY", "TX", "FL", "OH", "IL", "PA", "MI"};
+String qsoExchanges[] = { "CQ CQ DE ", " K", " TU 73", "599 ", "5NN ", "QTH ", "NAME ", "AGE ", "PWR ", "ANT " };
+
 
 // Koch method character progression
 String kochLessons[] = {
@@ -188,21 +213,12 @@ struct MorseChar {
 };
 
 MorseChar morseTable[] = {
-  {'A', ".-"}, {'B', "-..."}, {'C', "-.-."}, {'D', "-.."}, {'E', "."}, 
-  {'F', "..-."}, {'G', "--."}, {'H', "...."}, {'I', ".."}, {'J', ".---"},
-  {'K', "-.-"}, {'L', ".-.."}, {'M', "--"}, {'N', "-."}, {'O', "---"},
-  {'P', ".--."}, {'Q', "--.-"}, {'R', ".-."}, {'S', "..."}, {'T', "-"},
-  {'U', "..-"}, {'V', "...-"}, {'W', ".--"}, {'X', "-..-"}, {'Y', "-.--"},
-  {'Z', "--.."}, {'1', ".----"}, {'2', "..---"}, {'3', "...--"}, {'4', "....-"},
-  {'5', "....."}, {'6', "-...."}, {'7', "--..."}, {'8', "---.."}, {'9', "----."},
-  {'0', "-----"}, {'/', "-..-."}, {'?', "..--.."}, {',', "--..--"}, {'.', ".-.-.-"},
-  {'=', "-...-"}, {'+', ".-.-."}, {'-', "-....-"}, {'(', "-.--."}, {')', "-.--.-"},
-  {'"', ".-..-."}, {':', "---..."}, {';', "-.-.-."}, {'@', ".--.-."}, {'!', "-.-.--"}
+  { 'A', ".-" }, { 'B', "-..." }, { 'C', "-.-." }, { 'D', "-.." }, { 'E', "." }, { 'F', "..-." }, { 'G', "--." }, { 'H', "...." }, { 'I', ".." }, { 'J', ".---" }, { 'K', "-.-" }, { 'L', ".-.." }, { 'M', "--" }, { 'N', "-." }, { 'O', "---" }, { 'P', ".--." }, { 'Q', "--.-" }, { 'R', ".-." }, { 'S', "..." }, { 'T', "-" }, { 'U', "..-" }, { 'V', "...-" }, { 'W', ".--" }, { 'X', "-..-" }, { 'Y', "-.--" }, { 'Z', "--.." }, { '1', ".----" }, { '2', "..---" }, { '3', "...--" }, { '4', "....-" }, { '5', "....." }, { '6', "-...." }, { '7', "--..." }, { '8', "---.." }, { '9', "----." }, { '0', "-----" }, { '/', "-..-." }, { '?', "..--.." }, { ',', "--..--" }, { '.', ".-.-.-" }, { '=', "-...-" }, { '+', ".-.-." }, { '-', "-....-" }, { '(', "-.--." }, { ')', "-.--.-" }, { '"', ".-..-." }, { ':', "---..." }, { ';', "-.-.-." }, { '@', ".--.-." }, { '!', "-.-.--" }
 };
 const int morseTableSize = sizeof(morseTable) / sizeof(MorseChar);
 
-const char* waveformNames[] = {"Sine", "Square", "Sawtooth", "Triangle"};
-const char* practiceModeNames[] = {"Koch", "Callsign", "QSO", "Contest", "Custom"};
+const char* waveformNames[] = { "Sine", "Square", "Sawtooth", "Triangle" };
+const char* practiceModeNames[] = { "Koch", "Callsign", "QSO", "Contest", "Custom" };
 
 // EEPROM addresses
 const int STATS_ADDR = 0;
@@ -210,59 +226,60 @@ const int KOCH_LESSON_ADDR = sizeof(TrainingStats);
 const int SETTINGS_ADDR = KOCH_LESSON_ADDR + sizeof(int);
 
 void setup() {
-  Serial.begin(115200);  // USB Serial for debugging
-  Serial1.begin(115200); // UART to ESP-01 module
-  
+  Serial1.begin(115200);   // UART to wifi companion module
+  Serial1.setTimeout(20);  // longer timeout to receive full lines
+  Serial.begin(115200);    // USB Serial for debugging
+
   // Initialize display
-  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+  if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println("SSD1306 allocation failed");
   }
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0,0);
+  display.setCursor(0, 0);
   display.println("CW Ultimate Trainer");
   display.println("v5.1 Loading...");
   display.display();
-  
+
   Serial.println("==============================================");
   Serial.println("CW ULTIMATE TRAINING MACHINE v5.1");
   Serial.println("==============================================");
   Serial.println("Features: Koch Method, QSO Sim, Callsigns,");
   Serial.println("Contest Mode, OLED Display, Statistics,");
-  Serial.println("ESP-01 WiFi Integration");
+  Serial.println("ESP32 WiFi Integration");
   Serial.println("==============================================");
-  
+
   // Pin setup
   setupPins();
-  
+
   // Load saved data from EEPROM
   loadSettings();
-  
+
   // Audio setup
   AudioMemory(35);  // Increased for all features
   sgtl5000_1.enable();
   sgtl5000_1.volume(0.8);
   sgtl5000_1.inputSelect(AUDIO_INPUT_LINEIN);
   sgtl5000_1.lineInLevel(5);  // Adjustable line input level
-  
+
   // Configure envelope
   envelope1.attack(ATTACK_TIME);
   envelope1.decay(DECAY_TIME);
   envelope1.sustain(SUSTAIN_LEVEL);
   envelope1.release(RELEASE_TIME);
-  
+
   // Configure mixers
   decodeMixer.gain(0, 1.0);  // Internal sidetone
   decodeMixer.gain(1, 0.0);  // External audio (off initially)
-  
+
   // Initialize WiFi communication
   if (wifiEnabled) {
     initializeWiFiComm();
   } else {
     Serial.println("WiFi disabled - use serial or OLED interface");
   }
-  
+
   // Initial setup
   updateWaveform();
   updateFrequency();
@@ -270,56 +287,50 @@ void setup() {
   updateOutputRouting();
   updateToneDetector();
   initializeKoch();
-  
+
   sessionStartTime = millis();
-  
+
   Serial.println("Ready! Use buttons, serial, or web interface.");
   updateDisplay();
 }
 
 void loop() {
-  // Handle WiFi communication with ESP-01
+  // Handle WiFi communication with wifi companion
   if (wifiEnabled) {
     handleWiFiComm();
   }
-  
+
   // Update debouncers
   updateDebouncers();
-  
+
   // Handle serial commands
   handleSerialCommands();
-  
+
   // Handle button inputs
   handleButtons();
-  
+
   // Handle CW key (manual keying)
   if (!kochSending) {
     handleManualKeying();
   }
-  
+
   // Handle decoder
   if (decoderEnabled && !kochSending) {
     processCWDecoder();
   }
-  
+
   // Handle various training modes
   handleTrainingModes();
-  
+
   // Update controls and display
   updateControls();
-  
+
   // Update display periodically
   if (millis() - lastDisplayUpdate > 100) {
     updateDisplay();
     lastDisplayUpdate = millis();
   }
-  
-  // Send status updates to WiFi module
-  if (wifiEnabled && millis() - lastWiFiUpdate > 2000) {
-    sendStatusToWiFi();
-    lastWiFiUpdate = millis();
-  }
-  
+
   // Auto-save statistics every 5 minutes
   static unsigned long lastSave = 0;
   if (millis() - lastSave > 300000) {
@@ -338,7 +349,7 @@ void setupPins() {
   pinMode(INPUT_SELECT_BTN, INPUT_PULLUP);
   pinMode(MENU_BTN, INPUT_PULLUP);
   pinMode(SELECT_BTN, INPUT_PULLUP);
-  
+
   // Setup debouncers
   keyDebouncer.attach(KEY_PIN);
   keyDebouncer.interval(5);
@@ -357,6 +368,17 @@ void setupPins() {
   menuButton.attach(MENU_BTN);
   menuButton.interval(50);
   selectButton.attach(SELECT_BTN);
+
+  // Built-in LED for status indication
+  pinMode(LED_BUILTIN, OUTPUT);
+  digitalWrite(LED_BUILTIN, HIGH);
+
+  // WiFi companion reset pin
+  pinMode(WIFI_RST_PIN, OUTPUT);
+  digitalWrite(WIFI_RST_PIN, HIGH);  // keep ESP32 enabled after boot
+
+  // WiFi companion ready input
+  pinMode(WIFI_READY_PIN, INPUT_PULLUP);
   selectButton.interval(50);
 }
 
@@ -386,23 +408,23 @@ void handleButtons() {
     }
     updateDisplay();
   }
-  
+
   if (selectButton.fell() && inMenu) {
     handleMenuSelection();
   }
-  
+
   // Direct controls (when not in menu)
   if (!inMenu) {
     if (waveformButton.fell()) {
       currentWaveform = (currentWaveform + 1) % 4;
       updateWaveform();
     }
-    
+
     if (outputButton.fell()) {
       useHeadphones = !useHeadphones;
       updateOutputRouting();
     }
-    
+
     if (decoderButton.fell()) {
       decoderEnabled = !decoderEnabled;
       if (decoderEnabled) {
@@ -411,13 +433,13 @@ void handleButtons() {
         lastWordTime = millis();
       }
     }
-    
+
     if (inputSelectButton.fell()) {
       useExternalAudio = !useExternalAudio;
       decodeMixer.gain(0, useExternalAudio ? 0.0 : 1.0);  // Internal sidetone
       decodeMixer.gain(1, useExternalAudio ? 1.0 : 0.0);  // External audio
     }
-    
+
     if (kochModeButton.fell()) {
       kochModeEnabled = !kochModeEnabled;
       if (kochModeEnabled) {
@@ -427,7 +449,7 @@ void handleButtons() {
         stopKochLesson();
       }
     }
-    
+
     if (kochNextButton.fell()) {
       handlePracticeModeButton();
     }
@@ -447,28 +469,28 @@ void handleMenuSelection() {
         inMenu = false;
       }
       break;
-      
+
     case PRACTICE_MENU:
       currentPracticeMode = (PracticeMode)menuSelection;
       startPracticeMode();
       inMenu = false;
       break;
-      
+
     case SETTINGS_MENU:
       // Handle settings changes
       inMenu = false;
       break;
-      
+
     case STATS_MENU:
       // Display detailed stats
       displayDetailedStats();
       break;
-      
+
     case QSO_MENU:
       startQSOSimulation();
       inMenu = false;
       break;
-      
+
     default:
       inMenu = false;
       break;
@@ -484,19 +506,19 @@ void handlePracticeModeButton() {
         evaluateKochSession();
       }
       break;
-      
+
     case CALLSIGN_PRACTICE:
       generateCallsignLesson();
       break;
-      
+
     case QSO_SIMULATION:
       continueQSOSimulation();
       break;
-      
+
     case CONTEST_MODE:
       generateContestExchange();
       break;
-      
+
     case CUSTOM_LESSON:
       generateCustomLesson();
       break;
@@ -509,23 +531,36 @@ void startPracticeMode() {
       kochModeEnabled = true;
       startKochLesson();
       break;
-      
+
     case CALLSIGN_PRACTICE:
       generateCallsignLesson();
       break;
-      
+
     case QSO_SIMULATION:
       startQSOSimulation();
       break;
-      
+
     case CONTEST_MODE:
       generateContestExchange();
       break;
-      
+
     case CUSTOM_LESSON:
       generateCustomLesson();
       break;
   }
+}
+
+// Helper to initialize a generated lesson and update state/display
+void startLesson(const String& lesson, const char* title) {
+  kochSentText = lesson;
+  kochReceivedText = "";
+  kochCharIndex = 0;
+  kochSendTimer = millis();
+  kochSending = true;
+  kochListening = false;
+  Serial.println(title);
+  Serial.println(lesson);
+  updateDisplay();
 }
 
 void generateCallsignLesson() {
@@ -534,98 +569,74 @@ void generateCallsignLesson() {
     String callsign = generateRandomCallsign();
     lesson += callsign + " ";
   }
-  
-  kochSentText = lesson;
-  kochReceivedText = "";
-  kochCharIndex = 0;
-  kochSendTimer = millis();
-  kochSending = true;
-  kochListening = false;
-  
-  Serial.println("Callsign Practice:");
-  Serial.println(lesson);
+
+  startLesson(lesson, "Callsign Practice:");
+}
+
+// Centralised settings application – updates all subsystems after any config change
+void applySettings() {
+  updateFrequency();
+  updateToneDetector();
+  calculateKochTiming();
   updateDisplay();
+  sendStatusToWiFi();
+}
+
+// Helper to read flash string tables and return as Arduino String
+String readProgmemString(const char* const* table, uint8_t index, uint8_t maxLen) {
+  char buf[8];  // sufficient for our small tokens
+  if (index >= maxLen) return String();
+  strcpy_P(buf, (PGM_P)pgm_read_ptr(&table[index]));
+  return String(buf);
 }
 
 String generateRandomCallsign() {
   String callsign = "";
-  
+
   // Choose prefix
-  int prefixIndex = random(sizeof(callsignPrefixes) / sizeof(callsignPrefixes[0]));
-  callsign += callsignPrefixes[prefixIndex];
-  
+  int prefixIndex = random(CALLSIGN_PREFIXES_COUNT);
+  callsign += readProgmemString((const char* const*)CALLSIGN_PREFIXES, prefixIndex, CALLSIGN_PREFIXES_COUNT);
+
   // Add number
   callsign += String(random(0, 10));
-  
+
   // Add suffix (1-3 letters)
   int suffixLength = random(1, 4);
   for (int i = 0; i < suffixLength; i++) {
-    int suffixIndex = random(sizeof(callsignSuffixes) / sizeof(callsignSuffixes[0]));
-    callsign += callsignSuffixes[suffixIndex];
+    int suffixIndex = random(CALLSIGN_SUFFIXES_COUNT);
+    callsign += readProgmemString((const char* const*)CALLSIGN_SUFFIXES, suffixIndex, CALLSIGN_SUFFIXES_COUNT);
   }
-  
+
   return callsign;
-}
-
-void startQSOSimulation() {
-  // Generate realistic QSO
-  String qso = "CQ CQ DE " + generateRandomCallsign() + " " + generateRandomCallsign() + " K ";
-  qso += generateRandomCallsign() + " DE " + generateRandomCallsign() + " ";
-  qso += "599 " + generateRandomCallsign() + " TU 73 ";
-  
-  kochSentText = qso;
-  kochReceivedText = "";
-  kochCharIndex = 0;
-  kochSendTimer = millis();
-  kochSending = true;
-  kochListening = false;
-  
-  Serial.println("QSO Simulation:");
-  Serial.println(qso);
-  updateDisplay();
-}
-
-void continueQSOSimulation() {
-  // Continue with next part of QSO
-  startQSOSimulation();  // For now, just start a new one
 }
 
 void generateContestExchange() {
   String exchange = "";
-  
+
   // Generate contest number
   static int contestNumber = 1;
   if (contestNumber < 10) exchange += "00";
   else if (contestNumber < 100) exchange += "0";
   exchange += String(contestNumber++) + " ";
-  
+
   // Add state/province
-  int stateIndex = random(sizeof(contestExchanges) / sizeof(contestExchanges[0]));
-  exchange += contestExchanges[stateIndex] + " ";
-  
+  int stateIndex = random(CONTEST_EXCHANGES_COUNT);
+  exchange += readProgmemString((const char* const*)CONTEST_EXCHANGES, stateIndex, CONTEST_EXCHANGES_COUNT) + " ";
+
   // Repeat for multiple exchanges
   String lesson = "";
   for (int i = 0; i < 5; i++) {
     lesson += generateRandomCallsign() + " " + exchange;
   }
-  
-  kochSentText = lesson;
-  kochReceivedText = "";
-  kochCharIndex = 0;
-  kochSendTimer = millis();
-  kochSending = true;
-  kochListening = false;
-  
-  Serial.println("Contest Practice:");
-  Serial.println(lesson);
-  updateDisplay();
+
+  startLesson(lesson, "Contest Practice:");
 }
 
 void generateCustomLesson() {
   // Generate lesson based on user's weak characters
   String weakChars = findWeakCharacters();
   if (weakChars.length() == 0) weakChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  
+
   String lesson = "";
   for (int i = 0; i < 50; i++) {
     if (i % 6 == 5) {
@@ -634,29 +645,20 @@ void generateCustomLesson() {
       lesson += weakChars.charAt(random(weakChars.length()));
     }
   }
-  
-  kochSentText = lesson;
-  kochReceivedText = "";
-  kochCharIndex = 0;
-  kochSendTimer = millis();
-  kochSending = true;
-  kochListening = false;
-  
-  Serial.println("Custom Lesson (Weak Characters):");
-  Serial.println(lesson);
-  updateDisplay();
+
+  startLesson(lesson, "Custom Lesson (Weak Characters):");
 }
 
 String findWeakCharacters() {
   String weakChars = "";
   float threshold = stats.averageAccuracy * 0.8;  // Characters below 80% of average
-  
+
   for (int i = 0; i < 26; i++) {
     if (stats.characterErrors[i] > threshold) {
       weakChars += char('A' + i);
     }
   }
-  
+
   return weakChars;
 }
 
@@ -665,48 +667,41 @@ void handleSerialCommands() {
     String command = Serial.readStringUntil('\n');
     command.trim();
     command.toUpperCase();
-    
+
     if (command.startsWith("SPEED ")) {
       int speed = command.substring(6).toInt();
       if (speed >= 5 && speed <= 50) {
         kochSpeed = speed;
-        calculateKochTiming();
+        applySettings();
         Serial.println("Speed set to " + String(speed) + " WPM");
       }
-    }
-    else if (command.startsWith("FARNSWORTH ")) {
+    } else if (command.startsWith("FARNSWORTH ")) {
       int farnsworth = command.substring(11).toInt();
       if (farnsworth >= 5 && farnsworth <= kochSpeed) {
         kochEffectiveSpeed = farnsworth;
-        calculateKochTiming();
+        applySettings();
         Serial.println("Farnsworth speed set to " + String(farnsworth) + " WPM");
       }
-    }
-    else if (command.startsWith("LESSON ")) {
+    } else if (command.startsWith("LESSON ")) {
       int lesson = command.substring(7).toInt();
       if (lesson >= 1 && lesson <= 40) {
         kochLesson = lesson;
         initializeKoch();
         Serial.println("Jumped to lesson " + String(lesson));
       }
-    }
-    else if (command == "STATS") {
+    } else if (command == "STATS") {
       displayDetailedStats();
-    }
-    else if (command == "RESET") {
+    } else if (command == "RESET") {
       resetAllStats();
       Serial.println("All statistics reset");
-    }
-    else if (command.startsWith("FREQ ")) {
+    } else if (command.startsWith("FREQ ")) {
       int freq = command.substring(5).toInt();
       if (freq >= 300 && freq <= 1200) {
         sidetoneFreq = freq;
-        updateFrequency();
-        updateToneDetector();
+        applySettings();
         Serial.println("Frequency set to " + String(freq) + " Hz");
       }
-    }
-    else if (command == "HELP") {
+    } else if (command == "HELP") {
       printHelp();
     }
   }
@@ -760,19 +755,19 @@ void startKochLesson() {
   kochListening = false;
   kochCorrect = 0;
   kochTotal = 0;
-  
+
   Serial.println("\n=== KOCH LESSON " + String(kochLesson) + " ===");
   Serial.println("Characters: " + kochCharSet);
   Serial.println("Speed: " + String(kochSpeed) + "/" + String(kochEffectiveSpeed) + " WPM");
   Serial.println("Text: " + kochSentText);
   Serial.println("Sending...");
-  
+
   decodedText = "";
-  
+
   // Send current lesson text to WiFi
   sendCurrentTextToWiFi(kochSentText);
   sendStatusToWiFi();
-  
+
   updateDisplay();
 }
 
@@ -808,10 +803,10 @@ void processKochSending() {
     }
     return;
   }
-  
+
   unsigned long currentTime = millis();
   char currentChar = kochSentText.charAt(kochCharIndex);
-  
+
   if (currentChar == ' ') {
     if (currentTime - kochSendTimer >= wordSpaceThreshold) {
       kochCharIndex++;
@@ -830,7 +825,7 @@ bool sendMorseCharacter(String morseCode, unsigned long currentTime) {
   static int elementIndex = 0;
   static unsigned long elementTimer = 0;
   static bool elementState = false;
-  
+
   if (kochCharIndex == 0 || kochSendTimer <= currentTime) {
     elementIndex = 0;
     elementTimer = currentTime;
@@ -838,16 +833,16 @@ bool sendMorseCharacter(String morseCode, unsigned long currentTime) {
     envelope1.noteOn();
     return false;
   }
-  
+
   if (elementIndex >= morseCode.length()) {
     envelope1.noteOff();
     elementIndex = 0;
     return true;
   }
-  
+
   char element = morseCode.charAt(elementIndex);
   unsigned long elementDuration = (element == '.') ? ditLength : (ditLength * 3);
-  
+
   if (elementState) {
     if (currentTime - elementTimer >= elementDuration) {
       envelope1.noteOff();
@@ -864,7 +859,7 @@ bool sendMorseCharacter(String morseCode, unsigned long currentTime) {
       }
     }
   }
-  
+
   return false;
 }
 
@@ -873,27 +868,26 @@ void evaluateKochSession() {
     Serial.println("No characters to evaluate.");
     return;
   }
-  
+
   kochAccuracy = (float)kochCorrect / kochTotal * 100.0;
   stats.lessonAccuracy[kochLesson - 1] = kochAccuracy;
-  
+
   Serial.println("\n=== LESSON RESULTS ===");
-  Serial.println("Accuracy: " + String(kochAccuracy, 1) + "% (" + 
-                String(kochCorrect) + "/" + String(kochTotal) + ")");
-  
+  Serial.println("Accuracy: " + String(kochAccuracy, 1) + "% (" + String(kochCorrect) + "/" + String(kochTotal) + ")");
+
   if (kochAccuracy >= 90.0) {
     kochLesson++;
     if (kochLesson > 40) kochLesson = 40;
     kochCharSet = kochLessons[kochLesson - 1];
     Serial.println("Excellent! Advancing to lesson " + String(kochLesson));
-    
+
     if (kochLesson > stats.highestLesson) {
       stats.highestLesson = kochLesson;
     }
   } else {
     Serial.println("Practice more with lesson " + String(kochLesson));
   }
-  
+
   stats.sessionsCompleted++;
   saveSettings();
   calculateKochTiming();
@@ -918,7 +912,7 @@ String getMorseCode(char c) {
 void processCWDecoder() {
   bool toneDetected = toneDetect1.available() && toneDetect1.read() > TONE_THRESHOLD;
   unsigned long currentTime = millis();
-  
+
   if (toneDetected != lastToneState) {
     if (toneDetected) {
       if (lastToneState == false && currentTime - lastKeyChange > 50) {
@@ -934,13 +928,12 @@ void processCWDecoder() {
     lastKeyChange = currentTime;
     lastToneState = toneDetected;
   }
-  
+
   if (currentCharacter.length() > 0 && currentTime - lastCharacterTime > charSpaceThreshold) {
     processCharacter();
   }
-  
-  if (currentTime - lastWordTime > wordSpaceThreshold && decodedText.length() > 0 && 
-      !decodedText.endsWith(" ")) {
+
+  if (currentTime - lastWordTime > wordSpaceThreshold && decodedText.length() > 0 && !decodedText.endsWith(" ")) {
     decodedText += " ";
     if (!kochModeEnabled) Serial.print(" ");
   }
@@ -958,7 +951,7 @@ void processElement(unsigned long duration) {
   } else {
     float avgDitLength = ditLength;
     dahThreshold = avgDitLength * 2.5;
-    
+
     if (duration < dahThreshold) {
       currentCharacter += ".";
       stats.totalDits++;
@@ -968,7 +961,7 @@ void processElement(unsigned long duration) {
       stats.totalDahs++;
     }
   }
-  
+
   lastCharacterTime = millis();
   charSpaceThreshold = ditLength * 3.0;
   wordSpaceThreshold = ditLength * 7.0;
@@ -986,11 +979,11 @@ void processSpace(unsigned long duration) {
 
 void processCharacter() {
   char decodedChar = lookupMorseCharacter(currentCharacter);
-  
+
   if (kochListening && decodedChar != '?') {
     kochReceivedText += decodedChar;
     kochTotal++;
-    
+
     if (kochTotal <= kochSentText.length()) {
       char expectedChar = kochSentText.charAt(kochTotal - 1);
       if (decodedChar == expectedChar) {
@@ -1012,7 +1005,7 @@ void processCharacter() {
       Serial.print(decodedChar);
       sendDecodedTextToWiFi(String(decodedChar));
       stats.charactersDecoded++;
-      
+
       if (stats.charactersDecoded > 0) {
         float timeMinutes = (millis() - sessionStartTime) / 60000.0;
         currentWPM = (stats.charactersDecoded * 2.4) / timeMinutes;
@@ -1020,7 +1013,7 @@ void processCharacter() {
           stats.bestWPM = currentWPM;
         }
       }
-      
+
       if (stats.charactersDecoded % 10 == 0) {
         Serial.print(" |Stats: ");
         Serial.print(stats.totalDits);
@@ -1037,7 +1030,7 @@ void processCharacter() {
       sendDecodedTextToWiFi("?");
     }
   }
-  
+
   currentCharacter = "";
   lastWordTime = millis();
 }
@@ -1051,17 +1044,18 @@ char lookupMorseCharacter(String morseCode) {
   return '?';
 }
 
+// --------------------
+// UI knob / button polling
 void updateControls() {
   if (millis() - lastFreqUpdate > 100) {
     float newFreq = mapFloat(analogRead(FREQ_POT), 0, 1023, 300.0, 1200.0);
     if (abs(newFreq - sidetoneFreq) > 5.0) {
       sidetoneFreq = newFreq;
-      updateFrequency();
-      updateToneDetector();
+      applySettings();
       lastFreqUpdate = millis();
     }
   }
-  
+
   if (millis() - lastVolumeUpdate > 100) {
     float newVolume = mapFloat(analogRead(VOLUME_POT), 0, 1023, 0.0, 1.0);
     if (abs(newVolume - volume) > 0.05) {
@@ -1070,13 +1064,13 @@ void updateControls() {
       lastVolumeUpdate = millis();
     }
   }
-  
+
   // Speed control from potentiometer
   int newSpeed = map(analogRead(SPEED_POT), 0, 1023, 5, 50);
   if (abs(newSpeed - kochSpeed) > 1) {
     kochSpeed = newSpeed;
     kochEffectiveSpeed = max(5, kochSpeed * 0.6);  // Auto-adjust Farnsworth
-    calculateKochTiming();
+    applySettings();
   }
 }
 
@@ -1084,13 +1078,13 @@ void updateDisplay() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setCursor(0, 0);
-  
+
   if (inMenu) {
     displayMenu();
   } else {
     displayMainScreen();
   }
-  
+
   display.display();
 }
 
@@ -1102,7 +1096,7 @@ void displayMenu() {
       display.println("- Set Lesson #");
       display.println("- Speed Control");
       break;
-      
+
     case PRACTICE_MENU:
       display.println("PRACTICE MODES");
       display.println("- Koch Method");
@@ -1111,7 +1105,7 @@ void displayMenu() {
       display.println("- Contest Mode");
       display.println("- Custom Lesson");
       break;
-      
+
     case SETTINGS_MENU:
       display.println("SETTINGS");
       display.printf("Freq: %.0f Hz\n", sidetoneFreq);
@@ -1119,7 +1113,7 @@ void displayMenu() {
       display.println("Waveform: " + String(waveformNames[currentWaveform]));
       display.println("Output: " + String(useHeadphones ? "HP" : "SPK"));
       break;
-      
+
     case STATS_MENU:
       display.println("STATISTICS");
       display.printf("Sessions: %lu\n", stats.sessionsCompleted);
@@ -1127,14 +1121,14 @@ void displayMenu() {
       display.printf("Chars: %lu\n", stats.charactersDecoded);
       display.printf("Accuracy: %.1f%%\n", stats.averageAccuracy);
       break;
-      
+
     case QSO_MENU:
       display.println("QSO SIMULATOR");
       display.println("- Start QSO");
       display.println("- Contest Mode");
       display.println("- Ragchew");
       break;
-      
+
     default:
       display.println("MAIN MENU");
       break;
@@ -1148,13 +1142,13 @@ void displayMainScreen() {
   } else {
     display.printf("Mode: %s\n", practiceModeNames[currentPracticeMode]);
   }
-  
+
   // Line 2: Frequency and waveform
   display.printf("%.0fHz %s\n", sidetoneFreq, waveformNames[currentWaveform]);
-  
+
   // Line 3: Speed and volume
   display.printf("Spd:%d/%d Vol:%.0f%%\n", kochSpeed, kochEffectiveSpeed, volume * 100);
-  
+
   // Line 4: Status indicators
   String status = "";
   status += decoderEnabled ? "DEC " : "";
@@ -1162,7 +1156,7 @@ void displayMainScreen() {
   status += useExternalAudio ? "EXT " : "INT ";
   status += (wifiEnabled && espConnected) ? "WiFi" : "";
   display.println(status);
-  
+
   // Line 5-6: Current activity
   if (kochSending) {
     display.println("Sending...");
@@ -1177,7 +1171,7 @@ void displayMainScreen() {
     display.println("WiFi Ready");
     display.println("Web control active");
   }
-  
+
   // Line 7-8: Recent decoded text (last 21 chars)
   String recentText = decodedText;
   if (recentText.length() > 21) {
@@ -1194,14 +1188,14 @@ void displayDetailedStats() {
   Serial.printf("Training Time: %.1f hours\n", stats.totalTrainingMinutes / 60.0);
   Serial.printf("Highest Koch Lesson: %d\n", stats.highestLesson);
   Serial.printf("Average Accuracy: %.1f%%\n", stats.averageAccuracy);
-  
+
   Serial.println("\nCharacter Error Counts:");
   for (int i = 0; i < 26; i++) {
     if (stats.characterErrors[i] > 0) {
       Serial.printf("%c: %lu errors\n", 'A' + i, stats.characterErrors[i]);
     }
   }
-  
+
   Serial.println("\nKoch Lesson Accuracy:");
   for (int i = 0; i < min(40, stats.highestLesson); i++) {
     if (stats.lessonAccuracy[i] > 0) {
@@ -1223,12 +1217,12 @@ void resetAllStats() {
 void loadSettings() {
   EEPROM.get(STATS_ADDR, stats);
   EEPROM.get(KOCH_LESSON_ADDR, kochLesson);
-  
+
   // Validate loaded data
   if (kochLesson < 1 || kochLesson > 40) {
     kochLesson = 1;
   }
-  
+
   // Calculate average accuracy
   float totalAccuracy = 0;
   int validLessons = 0;
@@ -1246,10 +1240,10 @@ void loadSettings() {
 void saveSettings() {
   stats.totalTrainingMinutes += (millis() - sessionStartTime) / 60000.0;
   stats.lastSessionTime = millis();
-  
+
   EEPROM.put(STATS_ADDR, stats);
   EEPROM.put(KOCH_LESSON_ADDR, kochLesson);
-  
+
   sessionStartTime = millis();  // Reset session timer
 }
 
@@ -1257,12 +1251,21 @@ void saveSettings() {
 void updateWaveform() {
   mixer1.gain(0, 0);
   mixer1.gain(1, 0);
-  
+
   switch (currentWaveform) {
     case 0: mixer1.gain(0, 1.0); break;
-    case 1: waveform1.begin(WAVEFORM_SQUARE); mixer1.gain(1, 0.3); break;
-    case 2: waveform1.begin(WAVEFORM_SAWTOOTH); mixer1.gain(1, 0.5); break;
-    case 3: waveform1.begin(WAVEFORM_TRIANGLE); mixer1.gain(1, 0.7); break;
+    case 1:
+      waveform1.begin(WAVEFORM_SQUARE);
+      mixer1.gain(1, 0.3);
+      break;
+    case 2:
+      waveform1.begin(WAVEFORM_SAWTOOTH);
+      mixer1.gain(1, 0.5);
+      break;
+    case 3:
+      waveform1.begin(WAVEFORM_TRIANGLE);
+      mixer1.gain(1, 0.7);
+      break;
   }
   updateFrequency();
 }
@@ -1293,148 +1296,200 @@ float mapFloat(float x, float in_min, float in_max, float out_min, float out_max
 }
 
 // ===============================================
-// WiFi Communication Functions (ESP-01 Integration)
+// WiFi Communication Functions (wifi companion Integration)
 // ===============================================
 
 void initializeWiFiComm() {
-  Serial.println("Initializing WiFi communication with ESP-01...");
-  
-  // Send initial handshake
+  // Send RESET_ESP only the first time after power-up to avoid reboot loops
+  static bool resetEspSent = false;
+  if (!resetEspSent) {
+    Serial1.println("RESET_ESP");
+    delay(600);  // allow reboot to begin
+    resetEspSent = true;
+  }
+
+  // Wait (max 10 s) for ESP32 to pull READY line LOW after it finishes Wi-Fi connection
+  unsigned long startWait = millis();
+  while (digitalRead(WIFI_READY_PIN) == HIGH && (millis() - startWait) < ((2 * PING_INTERVAL) + 10000)) {
+    delay(10);
+  }
+  if (digitalRead(WIFI_READY_PIN) == HIGH) {
+    Serial.println("ESP32 ready pin timeout. Proceeding without ready signal.");
+  } else {
+    Serial.println("ESP32 ready signal detected");
+    espConnected = true;
+    digitalWrite(LED_BUILTIN, LOW);
+  }
+
+  // Begin UART handshake
   Serial1.println("TEENSY:READY");
-  
-  // Wait for ESP-01 response
+
   unsigned long timeout = millis() + 5000;
-  while (millis() < timeout) {
+  while (millis() < timeout && !espConnected) {
     if (Serial1.available()) {
       String response = Serial1.readStringUntil('\n');
       response.trim();
-      if (response == "ESP01:READY") {
+      if (response == MSG_PONG) {
         espConnected = true;
-        Serial.println("ESP-01 connected successfully!");
-        break;
+        lastWiFiHeartbeat = millis();
+        digitalWrite(LED_BUILTIN, LOW);
+        Serial.println("WiFi companion connected");
       }
     }
-    delay(100);
   }
-  
+
   if (!espConnected) {
-    Serial.println("ESP-01 not responding - continuing without WiFi");
+    Serial.println("WiFi companion not responding. Disabling WiFi features.");
     wifiEnabled = false;
   } else {
-    // Send initial status
+    // Send initial status/stats so web UI is populated
     sendStatusToWiFi();
     sendStatsToWiFi();
   }
 }
 
 void handleWiFiComm() {
-  // Check for incoming commands from ESP-01
-  while (Serial1.available()) {
-    char c = Serial1.read();
-    if (c == '\n') {
-      processWiFiMessage(wifiIncomingData);
-      wifiIncomingData = "";
-    } else {
-      wifiIncomingData += c;
-    }
+  // Check for incoming commands from wifi companion
+  if (Serial1.available()) {
+    String wifiIncomingData = Serial1.readStringUntil('\n');
+    wifiIncomingData.trim();
+    processWiFiMessage(wifiIncomingData);
   }
-  
-  // Check for ESP-01 heartbeat
-  if (millis() - lastWiFiHeartbeat > 15000) {
-    // No heartbeat for 15 seconds - ESP may have reset
-    espConnected = false;
-    Serial.println("ESP-01 heartbeat lost");
+
+  // Send periodic heartbeat ping to ESP32-S3 WiFi companion
+  if (espConnected && millis() - lastPingTime > PING_INTERVAL) {
+    Serial1.println(MSG_PING);
+    lastPingTime = millis();
+  }
+
+  // Check for heartbeat timeout (no PONG received)
+  if (millis() - lastWiFiHeartbeat > (PING_INTERVAL + 15000)) {
+    if (espConnected) {
+      espConnected = false;
+      digitalWrite(LED_BUILTIN, HIGH);
+      Serial.println("WiFi companion heartbeat lost");
+    }
+    // Attempt recovery every 10 seconds
+    static unsigned long lastRecovery = 0;
+    if (millis() - lastRecovery > ((2 * PING_INTERVAL) + 30000)) {
+      Serial.println("Attempting ESP32 reset...");
+
+      // Hardware reset pulse on EN line for reliability
+      digitalWrite(WIFI_RST_PIN, LOW);
+      delay(100);
+      digitalWrite(WIFI_RST_PIN, HIGH);
+
+      // Run full handshake again
+      initializeWiFiComm();
+
+      lastRecovery = millis();
+    }
   }
 }
 
 void processWiFiMessage(String message) {
+  // Strip optional ESP32 debug prefix
+  if (message.startsWith("TEENSY >> ")) {
+    message = message.substring(10);
+  }
   message.trim();
-  
-  if (message == "ESP01:HEARTBEAT") {
+
+  // --- ESP32-S3 protocol handling ---
+  if (message == MSG_PONG) {
     lastWiFiHeartbeat = millis();
     espConnected = true;
-  }
-  else if (message == "ESP01:READY") {
-    espConnected = true;
-    Serial.println("ESP-01 reconnected");
-    // Send current status
+    digitalWrite(LED_BUILTIN, LOW);
+  } else if (message == "GET_STATUS") {
     sendStatusToWiFi();
+  } else if (message == "GET_STATS") {
     sendStatsToWiFi();
-  }
-  else if (message.startsWith("TEENSY:")) {
-    processRemoteCommand(message.substring(7));
-  }
+  } else if (message == "START") {
+    startPracticeMode();
+    sendStatusToWiFi();
+  } else if (message == "STOP") {
+    stopKochLesson();
+    sendStatusToWiFi();
+  } else if (message == "RESET") {
+    resetAllStats();
+    sendStatusToWiFi();
+  } else
+
+    // Deprecated: original firmware expected a separate HEARTBEAT message which the ESP32 no longer sends.
+    // PONG handling (above) now refreshes lastWiFiHeartbeat, so ignore any legacy HEARTBEAT string.
+    if (message == MSG_HEARTBEAT) {
+      // Intentionally left blank for backward compatibility
+    } else if (message == MSG_READY_ESP01 || message == MSG_READY_ESP32) {
+      espConnected = true;
+      lastWiFiHeartbeat = millis();
+      digitalWrite(LED_BUILTIN, LOW);
+      Serial.println("WiFi companion reconnected");
+      // Send current status
+      sendStatusToWiFi();
+      sendStatsToWiFi();
+    } else if (message.startsWith("TEENSY:")) {
+      processRemoteCommand(message.substring(7));
+    }
 }
 
 void processRemoteCommand(String command) {
   command.trim();
   Serial.println("WiFi Command: " + command);
-  
+
   if (command == "START_KOCH") {
     kochModeEnabled = true;
     currentPracticeMode = KOCH_TRAINING;
     startKochLesson();
-  }
-  else if (command == "CALLSIGN_PRACTICE") {
+  } else if (command == "CALLSIGN_PRACTICE") {
     currentPracticeMode = CALLSIGN_PRACTICE;
     generateCallsignLesson();
-  }
-  else if (command == "QSO_SIMULATION") {
+  } else if (command == "QSO_SIMULATION") {
     currentPracticeMode = QSO_SIMULATION;
     startQSOSimulation();
-  }
-  else if (command == "TOGGLE_DECODER") {
+  } else if (command == "TOGGLE_DECODER") {
     decoderEnabled = !decoderEnabled;
     if (decoderEnabled) {
       currentCharacter = "";
       lastCharacterTime = millis();
       lastWordTime = millis();
     }
-  }
-  else if (command.startsWith("SET_FREQ:")) {
+  } else if (command.startsWith("SET_FREQ:")) {
     int freq = command.substring(9).toInt();
     if (freq >= 300 && freq <= 1200) {
       sidetoneFreq = freq;
-      updateFrequency();
-      updateToneDetector();
+      applySettings();
     }
-  }
-  else if (command.startsWith("SET_SPEED:")) {
+  } else if (command.startsWith("SET_SPEED:")) {
     int speed = command.substring(10).toInt();
     if (speed >= 5 && speed <= 50) {
       kochSpeed = speed;
       kochEffectiveSpeed = max(5, speed * 0.6);  // Auto-adjust Farnsworth
-      calculateKochTiming();
+      applySettings();
     }
-  }
-  else if (command.startsWith("SET_LESSON:")) {
+  } else if (command.startsWith("SET_LESSON:")) {
     int lesson = command.substring(11).toInt();
     if (lesson >= 1 && lesson <= 40) {
       kochLesson = lesson;
       initializeKoch();
     }
-  }
-  else if (command == "STOP_TRAINING") {
+  } else if (command == "STOP_TRAINING") {
     stopKochLesson();
-  }
-  else if (command == "REPEAT_LESSON") {
+  } else if (command == "REPEAT_LESSON") {
     if (kochModeEnabled) {
       startKochLesson();
     }
-  }
-  else if (command == "EVALUATE_SESSION") {
+  } else if (command == "EVALUATE_SESSION") {
     if (kochModeEnabled) {
       evaluateKochSession();
     }
   }
-  
+
   // Send updated status after processing command
   sendStatusToWiFi();
 }
 
 void sendStatusToWiFi() {
   if (!wifiEnabled || !espConnected) return;
-  
+
   String status = "STATUS:";
   status += "LESSON=" + String(kochLesson) + ",";
   status += "FREQ=" + String(sidetoneFreq, 0) + ",";
@@ -1447,31 +1502,49 @@ void sendStatusToWiFi() {
   status += "OUT=" + String(useHeadphones ? "Headphones" : "Speaker") + ",";
   status += "SEND=" + String(kochSending ? 1 : 0) + ",";
   status += "LISTEN=" + String(kochListening ? 1 : 0);
-  
-  Serial1.println(status);
+
+  const unsigned long MIN_STATUS_INTERVAL = 1000;  // ms
+  if (millis() - lastStatusSentTime < MIN_STATUS_INTERVAL) {
+    return;  // throttle to 1 msg/sec
+  }
+  if (status != lastStatusSent || millis() - lastStatusSentTime > STATUS_KEEPALIVE_INTERVAL) {
+    Serial1.println(status);
+    lastStatusSent = status;
+    lastStatusSentTime = millis();
+  }
 }
 
 void sendStatsToWiFi() {
   if (!wifiEnabled || !espConnected) return;
-  
+
   String statsMsg = "STATS:";
   statsMsg += "SESSIONS=" + String(stats.sessionsCompleted) + ",";
   statsMsg += "CHARS=" + String(stats.charactersDecoded) + ",";
   statsMsg += "BESTWPM=" + String(stats.bestWPM, 1);
-  
+
   Serial1.println(statsMsg);
 }
 
 void sendDecodedTextToWiFi(String text) {
   if (!wifiEnabled || !espConnected) return;
-  
+
   // Send decoded characters to WiFi module
   Serial1.println("DECODED:" + text);
 }
 
 void sendCurrentTextToWiFi(String text) {
   if (!wifiEnabled || !espConnected) return;
-  
+
   // Send current lesson text to WiFi module
   Serial1.println("CURRENT:" + text);
+}
+
+// -------------------------------------------------------------------------
+//  Stub implementations (TODO: implement full functionality later)
+void startQSOSimulation() {
+  // Placeholder – future QSO simulation setup
+}
+
+void continueQSOSimulation() {
+  // Placeholder – continue / advance QSO simulation
 }
