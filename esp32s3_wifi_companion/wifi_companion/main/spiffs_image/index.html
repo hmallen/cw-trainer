@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CW Trainer Dashboard</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>CW Trainer Dashboard</h1>
+  </header>
+  <main>
+    <section id="connection">
+      <p>Device IP: <span id="device-ip">unknown</span></p>
+      <p>Last command: <span id="last-cmd">-</span></p>
+    </section>
+
+    <section id="controls">
+      <h2>Controls</h2>
+      <button data-cmd="START">START</button>
+      <button data-cmd="STOP">STOP</button>
+      <button data-cmd="RESET">RESET</button>
+    </section>
+
+    <section id="status-section">
+      <h2>Status</h2>
+      <table id="status-table"></table>
+    </section>
+
+    <section id="stats-section">
+      <h2>Stats</h2>
+      <table id="stats-table"></table>
+      <button id="reset-stats">Reset Stats</button>
+    </section>
+  </main>
+
+  <footer>
+    <small>ESP32-S3 WiFi Companion &copy; 2025</small>
+  </footer>
+
+  <script src="main.js"></script>
+</body>
+</html>
