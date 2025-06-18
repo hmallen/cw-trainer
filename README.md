@@ -11,10 +11,10 @@ The system is intended for radio amateurs who want an all-in-one portable traine
 - High-quality sine / arbitrary-waveform sidetone from 300–1200 Hz
 - Adjustable audio output: on-board DAC, headphone jack or external MAX98357A I²S amplifier
 - Practice modes  
-  * **Koch progression** (40 lessons) with automatic evaluation  
-  * **Random callsign** generator  
-  * **Simulated QSO** and **contest** exchanges  
-  * **Custom / weak-character** drills
+  - **Koch progression** (40 lessons) with automatic evaluation  
+  - **Random callsign** generator  
+  - **Simulated QSO** and **contest** exchanges  
+  - **Custom / weak-character** drills
 - Real-time CW decoder with AGC and tone detection
 - Integrated statistics saved to EEPROM (accuracy, WPM, session time, per-character errors)
 - 128×64 SSD1306 OLED-based menu system (Adafruit_GFX)
@@ -22,6 +22,7 @@ The system is intended for radio amateurs who want an all-in-one portable traine
 - Companion firmware for ESP8266 written using Arduino core & ArduinoJson
 
 ## Repository Layout
+
 ```text
 cw-trainer/
 ├── cw-trainer/              # Teensy 4.1 firmware (main project)
@@ -36,6 +37,7 @@ cw-trainer/
 ```
 
 ## Hardware Connections (Teensy 4.1)
+
 | Function | Pin | Note |
 |----------|-----|------|
 | Key input | 2 | Straight key or keyer output (active-low) |
@@ -80,6 +82,7 @@ cw-trainer/
 ## Potential Improvements
 
 Feel free to open issues or PRs! Some ideas:
+
 - OTA firmware update for ESP-01
 - Alternate decoder algorithms (FFT-based or ML)
 - Integration with online practice services (LCWO, MorseRunner)

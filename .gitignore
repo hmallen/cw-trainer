@@ -10,3 +10,18 @@ application.macosx
 out
 
 **/secrets.h
+esp32s3_wifi_companion/wifi_companion/build
+esp32s3_wifi_companion/wifi_companion/sdkconfig*
+**/settings.json
+**/compile_commands.json
+**/launch.json
+**/c_cpp_properties.json
+**/tasks.json
+**/esp-idf
+**/esp-idf-v5.4.1
+**/*.trace
+**/*.bin
+**/*.elf
+**/*.hex
+**/*.map
+**/*.log
