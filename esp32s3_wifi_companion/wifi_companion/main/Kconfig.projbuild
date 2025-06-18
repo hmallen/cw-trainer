@@ -1,0 +1,11 @@
+menu "WiFi Companion Configuration"
+
+    config WIFI_SSID
+        string "WiFi SSID"
+        default "MyHomeWiFi"
+    
+    config WIFI_PASS
+        string "WiFi Password"
+        default "SecretPass123"
+    
+    endmenu
