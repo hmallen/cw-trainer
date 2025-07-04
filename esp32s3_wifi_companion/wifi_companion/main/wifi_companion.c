@@ -20,8 +20,8 @@ static const char *TAG = "wifi_companion";
 #define WIFI_SSID      CONFIG_WIFI_SSID
 #define WIFI_PASS      CONFIG_WIFI_PASS
 #define UART_NUM       UART_NUM_0          // back to default UART0 for Teensy link
-#define UART_RX_PIN    GPIO_NUM_44         // IO44 = UART0 RX (connect to Teensy TX)
-#define UART_TX_PIN    GPIO_NUM_43         // IO43 = UART0 TX (connect to Teensy RX)
+#define UART_RX_PIN    GPIO_NUM_44         // IO44 = UART0 RX (Unconnected. Console output.)
+#define UART_TX_PIN    GPIO_NUM_43         // IO43 = UART0 TX (Unconnected. Console output.)
 #define UART_1         UART_NUM_1          // back to default UART0 for Teensy link
 #define UART_1_RX_PIN  GPIO_NUM_13         // IO13 = UART1 RX (connect to Teensy TX)
 #define UART_1_TX_PIN  GPIO_NUM_12         // IO12 = UART1 TX (connect to Teensy RX)

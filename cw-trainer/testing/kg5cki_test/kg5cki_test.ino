@@ -11,6 +11,12 @@
 #include "trainer_protocol.h"
 #include "trainer_constants.h"
 
+// ────────────────────────────────────────────────────────────────
+// Test-specific helpers
+// ────────────────────────────────────────────────────────────────
+const int TEST_WPM = 20;             // playback speed
+const int DIT_MS = 1200 / TEST_WPM;  // duration of one dit in ms
+
 // Display setup
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -22,7 +28,7 @@ void startQSOSimulation();
 void continueQSOSimulation();
 void displayDetailedStats();
 
-bool wifiEnabled = true;  // Set to true if you add WiFi module
+bool wifiEnabled = false;  // Set to true if you add WiFi module
 
 // Audio objects for generation
 AudioSynthWaveformSine sine1;
@@ -51,10 +57,10 @@ AudioConnection patchCord6(envelope1, 0, i2s1, 1);
 
 // Audio connections - Decoding path
 AudioConnection patchCord7(envelope1, 0, decodeMixer, 0);   // Internal sidetone
-AudioConnection patchCord8(audioInput, 0, decodeMixer, 1);  // External audionalysis
-
+AudioConnection patchCord8(audioInput, 0, decodeMixer, 1);  // External audio
 AudioConnection patchCord9(decodeMixer, toneDetect1);
-AudioConnection patchCord10(decodeMixer, 0, fft1024, 0);  // Spectrum a
+AudioConnection patchCord10(decodeMixer, 0, fft1024, 0);  // Spectrum analysis
+
 AudioControlSGTL5000 sgtl5000_1;
 
 // Pin definitions
@@ -68,17 +74,15 @@ const int SPEED_POT = A2;  // Koch speed control
 
 
 
-const int WIFI_RST_PIN = 28;    // ESP32 EN reset control
+const int WIFI_RST_PIN = 22;    // ESP32 EN reset control
 const int WIFI_READY_PIN = 23;  // ESP32 ready signal (low = ready)
 const int MENU_BTN = 9;         // Menu navigation
 #define BUTTON_PIN MENU_BTN     // Alias for legacy code
 
-const int AUDIO_INPUT_PIN = A3;  // External audio level
+const int AUDIO_INPUT_PIN = A17;  // External audio level
 // Rotary encoder pins
-const int ENC_A_PIN = 41;  // Encoder CLK
-const int ENC_B_PIN = 40;  // Encoder DT
-// Rotary encoder resolution (pulses per detent)
-const int ENCODER_STEPS_PER_DETENT = 4;
+const int ENC_A_PIN = 16;  // Encoder CLK
+const int ENC_B_PIN = 17;  // Encoder DT
 
 // Debounce objects
 Bounce keyDebouncer = Bounce();
@@ -125,10 +129,10 @@ int menuSelection = 0;
 bool inMenu = false;
 bool editMode = false;
 // Encoder push button timing
-const unsigned long LONG_PRESS_DURATION = 1000;  // ms threshold for long press to exit menu
 unsigned long buttonDownTime = 0;
-bool buttonIsDown = false;         // true while button physically held
-bool shortPressCandidate = false;  // cleared if long press detected
+bool buttonIsDown = false;
+bool lastButtonState = HIGH;
+unsigned long buttonPressTime = 0;
 Encoder knob(ENC_A_PIN, ENC_B_PIN);
 long lastEncoderPos = 0;
 
@@ -253,6 +257,44 @@ const int STATS_ADDR = 0;
 const int KOCH_LESSON_ADDR = sizeof(TrainingStats);
 const int SETTINGS_ADDR = KOCH_LESSON_ADDR + sizeof(int);
 
+void playDit() {
+  envelope1.noteOn();
+  delay(DIT_MS);
+  envelope1.noteOff();
+  delay(DIT_MS);  // 1-dit space between elements
+}
+
+void playDah() {
+  envelope1.noteOn();
+  delay(DIT_MS * 3);
+  envelope1.noteOff();
+  delay(DIT_MS);  // 1-dit space between elements
+}
+
+void playMorseChar(char c) {
+  // Look up the Morse representation from the existing table
+  String code = getMorseCode(toupper(c));
+  for (uint8_t i = 0; i < code.length(); i++) {
+    if (code[i] == '.') {
+      playDit();
+    } else if (code[i] == '-') {
+      playDah();
+    }
+  }
+  delay(DIT_MS * 2);  // additional 2-dit gap (total 3) between characters
+}
+
+void playStringAsMorse(const char* text) {
+  for (const char* p = text; *p; p++) {
+    char ch = *p;
+    if (ch == ' ') {
+      delay(DIT_MS * 4);  // additional 4-dit gap (total 7) between words
+    } else {
+      playMorseChar(ch);
+    }
+  }
+}
+
 void setup() {
   Serial1.begin(115200);   // UART to wifi companion module
   Serial1.setTimeout(20);  // longer timeout to receive full lines
@@ -323,48 +365,13 @@ void setup() {
 }
 
 void loop() {
-  // Handle WiFi communication with wifi companion
-  if (wifiEnabled) {
-    handleWiFiComm();
+  static bool alreadyPlayed = false;
+  if (!alreadyPlayed) {
+    playStringAsMorse("KG5CKI");
+    alreadyPlayed = true;
   }
-
-  // Update debouncers
-  updateDebouncers();
-
-  // Handle serial commands
-  handleSerialCommands();
-
-  // Handle button inputs
-  handleButtons();
-
-  // Handle CW key (manual keying)
-  if (!kochSending) {
-    handleManualKeying();
-  }
-
-  // Handle decoder
-  if (decoderEnabled && !kochSending) {
-    processCWDecoder();
-  }
-
-  // Handle various training modes
-  handleTrainingModes();
-
-  // Update controls and display
-  updateControls();
-
-  // Update display periodically
-  if (millis() - lastDisplayUpdate > 100) {
-    updateDisplay();
-    lastDisplayUpdate = millis();
-  }
-
-  // Auto-save statistics every 5 minutes
-  static unsigned long lastSave = 0;
-  if (millis() - lastSave > 300000) {
-    saveSettings();
-    lastSave = millis();
-  }
+  // Remain idle; keep Teensy alive but do nothing else.
+  delay(1000);
 }
 
 void setupPins() {
@@ -424,43 +431,19 @@ void updateDebouncers() {
 }
 
 void handleButtons() {
-  // -------- Detect press start --------
+  // Menu navigation
   if (menuButton.fell()) {
-    buttonDownTime = millis();
-    buttonIsDown = true;
-    shortPressCandidate = true;  // assume short unless long detected
-  }
-
-  // -------- Long-press detection (while held) --------
-  if (buttonIsDown && (millis() - buttonDownTime) >= LONG_PRESS_DURATION) {
-    // Treat as long press once, then ignore until release
-    buttonIsDown = false;
-    shortPressCandidate = false;
-
-    if (inMenu || editMode) {
-      inMenu = false;
-      editMode = false;
-      updateDisplay();
-    }
-  }
-
-  // -------- Handle release --------
-  if (menuButton.rose()) {
-    buttonIsDown = false;
-
-    // If long press already handled, nothing further
-    if (!shortPressCandidate) return;
-
-    // ---- Short-press actions ----
     if (!inMenu) {
+      // Enter menu mode starting at Koch menu
       inMenu = true;
       currentMenu = KOCH_MENU;
       menuSelection = 0;
-      lastEncoderPos = knob.read() / ENCODER_STEPS_PER_DETENT;  // reset baseline
       updateDisplay();
     } else if (!editMode) {
+      // Select highlighted item or enter edit mode
       handleMenuSelection();
     } else {
+      // Confirm value / exit edit mode
       editMode = false;
       applySettings();
       updateDisplay();
@@ -1113,7 +1096,7 @@ int getMenuItemCount(MenuMode menu) {
 
 void updateControls() {
   // Rotary encoder navigation and button handling
-  long encPos = knob.read() / ENCODER_STEPS_PER_DETENT;  // convert raw counts to detent steps
+  long encPos = knob.read() / 4;  // divide by 4 to get full detent steps
   if (encPos != lastEncoderPos) {
     int delta = encPos - lastEncoderPos;
     lastEncoderPos = encPos;
@@ -1140,7 +1123,36 @@ void updateControls() {
     }
   }
 
-  // Button handling removed – handled exclusively in handleButtons() using Bounce2 debouncer to avoid conflicts
+  // Button handling
+  bool buttonPressed = digitalRead(BUTTON_PIN) == LOW;
+  if (buttonPressed != lastButtonState) {
+    lastButtonState = buttonPressed;
+    if (buttonPressed) {
+      buttonPressTime = millis();
+    } else {
+      unsigned long pressDuration = millis() - buttonPressTime;
+      if (pressDuration < 500) {  // Single press
+        if (inMenu) {
+          editMode = !editMode;
+          updateDisplay();
+        } else {
+          // Enter menu mode
+          inMenu = true;
+          updateDisplay();
+        }
+      } else {  // Long press
+        if (inMenu) {
+          // Exit menu mode
+          inMenu = false;
+          editMode = false;
+          updateDisplay();
+        } else {
+          // Reset all stats
+          resetAllStats();
+        }
+      }
+    }
+  }
 
   if (millis() - lastFreqUpdate > 100) {
     float newFreq = mapFloat(analogRead(FREQ_POT), 0, 1023, 300.0, 1200.0);
