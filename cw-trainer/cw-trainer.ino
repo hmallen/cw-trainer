@@ -4,6 +4,7 @@
 #include <SD.h>
 #include <SerialFlash.h>
 #include <Bounce2.h>
+#include <Encoder.h>
 #include <EEPROM.h>
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_GFX.h>
@@ -50,10 +51,10 @@ AudioConnection patchCord6(envelope1, 0, i2s1, 1);
 
 // Audio connections - Decoding path
 AudioConnection patchCord7(envelope1, 0, decodeMixer, 0);   // Internal sidetone
-AudioConnection patchCord8(audioInput, 0, decodeMixer, 1);  // External audio
-AudioConnection patchCord9(decodeMixer, toneDetect1);
-AudioConnection patchCord10(decodeMixer, 0, fft1024, 0);  // Spectrum analysis
+AudioConnection patchCord8(audioInput, 0, decodeMixer, 1);  // External audionalysis
 
+AudioConnection patchCord9(decodeMixer, toneDetect1);
+AudioConnection patchCord10(decodeMixer, 0, fft1024, 0);  // Spectrum a
 AudioControlSGTL5000 sgtl5000_1;
 
 // Pin definitions
@@ -61,38 +62,44 @@ const int KEY_PIN = 2;
 const int FREQ_POT = A0;
 const int VOLUME_POT = A1;
 const int SPEED_POT = A2;  // Koch speed control
-const int WAVEFORM_BTN = 3;
-const int OUTPUT_SELECT_BTN = 4;
-const int DECODER_TOGGLE_BTN = 5;
-const int KOCH_MODE_BTN = 6;
-const int KOCH_NEXT_BTN = 7;
-const int INPUT_SELECT_BTN = 8;  // Toggle internal/external audio
-const int WIFI_RST_PIN = 22;     // ESP32 EN reset control
-const int WIFI_READY_PIN = 23;   // ESP32 ready signal (low = ready)
-const int MENU_BTN = 9;          // Menu navigation
-const int SELECT_BTN = 10;       // Menu selection
+
+
+
+
+
+
+const int WIFI_RST_PIN = 28;    // ESP32 EN reset control
+const int WIFI_READY_PIN = 23;  // ESP32 ready signal (low = ready)
+const int MENU_BTN = 9;         // Menu navigation
+#define BUTTON_PIN MENU_BTN     // Alias for legacy code
+
 const int AUDIO_INPUT_PIN = A3;  // External audio level
+// Rotary encoder pins
+const int ENC_A_PIN = 41;  // Encoder CLK
+const int ENC_B_PIN = 40;  // Encoder DT
+// Rotary encoder resolution (pulses per detent)
+const int ENCODER_STEPS_PER_DETENT = 4;
 
 // Debounce objects
 Bounce keyDebouncer = Bounce();
-Bounce waveformButton = Bounce();
-Bounce outputButton = Bounce();
-Bounce decoderButton = Bounce();
-Bounce kochModeButton = Bounce();
-Bounce kochNextButton = Bounce();
-Bounce inputSelectButton = Bounce();
+
+
+
+
+
+
 Bounce menuButton = Bounce();
-Bounce selectButton = Bounce();
+
 
 // Configuration variables
 float sidetoneFreq = 600.0;
 float volume = 0.5;
 int currentWaveform = 0;
-bool useHeadphones = true;
+bool useHeadphones = false;
 bool keyPressed = false;
 bool decoderEnabled = true;
 bool kochModeEnabled = false;
-bool useExternalAudio = false;  // false = sidetone, true = radio input
+bool useExternalAudio = true;  // false = sidetone, true = radio input
 bool espConnected = false;
 unsigned long lastPingTime = 0;
 const unsigned long PING_INTERVAL = 5000;  // 1 second ping
@@ -116,6 +123,14 @@ enum MenuMode { MAIN_SCREEN,
 MenuMode currentMenu = MAIN_SCREEN;
 int menuSelection = 0;
 bool inMenu = false;
+bool editMode = false;
+// Encoder push button timing
+const unsigned long LONG_PRESS_DURATION = 1000;  // ms threshold for long press to exit menu
+unsigned long buttonDownTime = 0;
+bool buttonIsDown = false;         // true while button physically held
+bool shortPressCandidate = false;  // cleared if long press detected
+Encoder knob(ENC_A_PIN, ENC_B_PIN);
+long lastEncoderPos = 0;
 
 // Practice modes
 enum PracticeMode { KOCH_TRAINING,
@@ -165,6 +180,19 @@ struct TrainingStats {
 };
 
 TrainingStats stats;
+
+// Persisted device configuration
+struct DeviceSettings {
+  float sidetoneFreq;
+  float volume;
+  uint8_t waveform;
+  bool useHeadphones;
+  bool decoderEnabled;
+  bool useExternalAudio;
+  bool kochModeEnabled;
+};
+
+DeviceSettings deviceSettings;
 unsigned long sessionStartTime;
 float currentWPM = 0;
 
@@ -341,33 +369,36 @@ void loop() {
 
 void setupPins() {
   pinMode(KEY_PIN, INPUT_PULLUP);
-  pinMode(WAVEFORM_BTN, INPUT_PULLUP);
-  pinMode(OUTPUT_SELECT_BTN, INPUT_PULLUP);
-  pinMode(DECODER_TOGGLE_BTN, INPUT_PULLUP);
-  pinMode(KOCH_MODE_BTN, INPUT_PULLUP);
-  pinMode(KOCH_NEXT_BTN, INPUT_PULLUP);
-  pinMode(INPUT_SELECT_BTN, INPUT_PULLUP);
+
+
+
+
+
+
   pinMode(MENU_BTN, INPUT_PULLUP);
-  pinMode(SELECT_BTN, INPUT_PULLUP);
+  pinMode(ENC_A_PIN, INPUT_PULLUP);
+  pinMode(ENC_B_PIN, INPUT_PULLUP);
+  knob.write(0);
+
 
   // Setup debouncers
   keyDebouncer.attach(KEY_PIN);
   keyDebouncer.interval(5);
-  waveformButton.attach(WAVEFORM_BTN);
-  waveformButton.interval(50);
-  outputButton.attach(OUTPUT_SELECT_BTN);
-  outputButton.interval(50);
-  decoderButton.attach(DECODER_TOGGLE_BTN);
-  decoderButton.interval(50);
-  kochModeButton.attach(KOCH_MODE_BTN);
-  kochModeButton.interval(50);
-  kochNextButton.attach(KOCH_NEXT_BTN);
-  kochNextButton.interval(50);
-  inputSelectButton.attach(INPUT_SELECT_BTN);
-  inputSelectButton.interval(50);
+
+
+
+
+
+
+
+
+
+
+
+
   menuButton.attach(MENU_BTN);
   menuButton.interval(50);
-  selectButton.attach(SELECT_BTN);
+
 
   // Built-in LED for status indication
   pinMode(LED_BUILTIN, OUTPUT);
@@ -379,79 +410,60 @@ void setupPins() {
 
   // WiFi companion ready input
   pinMode(WIFI_READY_PIN, INPUT_PULLUP);
-  selectButton.interval(50);
 }
 
 void updateDebouncers() {
   keyDebouncer.update();
-  waveformButton.update();
-  outputButton.update();
-  decoderButton.update();
-  kochModeButton.update();
-  kochNextButton.update();
-  inputSelectButton.update();
+
+
+
+
+
+
   menuButton.update();
-  selectButton.update();
 }
 
 void handleButtons() {
-  // Menu navigation
+  // -------- Detect press start --------
   if (menuButton.fell()) {
+    buttonDownTime = millis();
+    buttonIsDown = true;
+    shortPressCandidate = true;  // assume short unless long detected
+  }
+
+  // -------- Long-press detection (while held) --------
+  if (buttonIsDown && (millis() - buttonDownTime) >= LONG_PRESS_DURATION) {
+    // Treat as long press once, then ignore until release
+    buttonIsDown = false;
+    shortPressCandidate = false;
+
+    if (inMenu || editMode) {
+      inMenu = false;
+      editMode = false;
+      updateDisplay();
+    }
+  }
+
+  // -------- Handle release --------
+  if (menuButton.rose()) {
+    buttonIsDown = false;
+
+    // If long press already handled, nothing further
+    if (!shortPressCandidate) return;
+
+    // ---- Short-press actions ----
     if (!inMenu) {
       inMenu = true;
       currentMenu = KOCH_MENU;
       menuSelection = 0;
+      lastEncoderPos = knob.read() / ENCODER_STEPS_PER_DETENT;  // reset baseline
+      updateDisplay();
+    } else if (!editMode) {
+      handleMenuSelection();
     } else {
-      // Cycle through menus
-      currentMenu = (MenuMode)((currentMenu + 1) % 6);
-      menuSelection = 0;
-    }
-    updateDisplay();
-  }
-
-  if (selectButton.fell() && inMenu) {
-    handleMenuSelection();
-  }
-
-  // Direct controls (when not in menu)
-  if (!inMenu) {
-    if (waveformButton.fell()) {
-      currentWaveform = (currentWaveform + 1) % 4;
-      updateWaveform();
-    }
-
-    if (outputButton.fell()) {
-      useHeadphones = !useHeadphones;
-      updateOutputRouting();
-    }
-
-    if (decoderButton.fell()) {
-      decoderEnabled = !decoderEnabled;
-      if (decoderEnabled) {
-        currentCharacter = "";
-        lastCharacterTime = millis();
-        lastWordTime = millis();
-      }
-    }
-
-    if (inputSelectButton.fell()) {
-      useExternalAudio = !useExternalAudio;
-      decodeMixer.gain(0, useExternalAudio ? 0.0 : 1.0);  // Internal sidetone
-      decodeMixer.gain(1, useExternalAudio ? 1.0 : 0.0);  // External audio
-    }
-
-    if (kochModeButton.fell()) {
-      kochModeEnabled = !kochModeEnabled;
-      if (kochModeEnabled) {
-        currentPracticeMode = KOCH_TRAINING;
-        startKochLesson();
-      } else {
-        stopKochLesson();
-      }
-    }
-
-    if (kochNextButton.fell()) {
-      handlePracticeModeButton();
+      editMode = false;
+      applySettings();
+      updateDisplay();
     }
   }
 }
@@ -477,8 +489,49 @@ void handleMenuSelection() {
       break;
 
     case SETTINGS_MENU:
-      // Handle settings changes
-      inMenu = false;
+      switch (menuSelection) {
+        case 2:  // Waveform edit
+          editMode = true;
+          break;
+        case 3:  // Output toggle edit
+          editMode = true;
+          break;
+        case 4:  // Decoder toggle
+          decoderEnabled = !decoderEnabled;
+          if (decoderEnabled) {
+            currentCharacter = "";
+            lastCharacterTime = millis();
+            lastWordTime = millis();
+          }
+          applySettings();
+          updateDisplay();
+          break;
+        case 5:  // Input toggle
+          useExternalAudio = !useExternalAudio;
+          decodeMixer.gain(0, useExternalAudio ? 0.0 : 1.0);
+          decodeMixer.gain(1, useExternalAudio ? 1.0 : 0.0);
+          applySettings();
+          updateDisplay();
+          break;
+        case 6:  // Koch Mode toggle
+          kochModeEnabled = !kochModeEnabled;
+          if (kochModeEnabled) {
+            currentPracticeMode = KOCH_TRAINING;
+            startKochLesson();
+          } else {
+            stopKochLesson();
+          }
+          applySettings();
+          updateDisplay();
+          break;
+        default:
+          // Non-editable items (Freq/Vol)
+          break;
+      }
+      // Remain in menu unless entering editMode
+      if (!editMode) {
+        // keep menu open to allow more adjustments
+      }
       break;
 
     case STATS_MENU:
@@ -1046,7 +1099,49 @@ char lookupMorseCharacter(String morseCode) {
 
 // --------------------
 // UI knob / button polling
+// Rotary encoder helper: return number of items in each menu
+int getMenuItemCount(MenuMode menu) {
+  switch (menu) {
+    case KOCH_MENU: return 3;      // Start, Lesson, Speed
+    case PRACTICE_MENU: return 5;  // Koch, Callsign, QSO, Contest, Custom
+    case SETTINGS_MENU: return 7;  // Freq, Vol, Waveform, Output, Decoder, Input, Koch Mode
+    case STATS_MENU: return 1;     // Stats page only
+    case QSO_MENU: return 3;       // Start, Contest, Ragchew
+    default: return 4;
+  }
+}
+
 void updateControls() {
+  // Rotary encoder navigation and button handling
+  long encPos = knob.read() / ENCODER_STEPS_PER_DETENT;  // convert raw counts to detent steps
+  if (encPos != lastEncoderPos) {
+    int delta = encPos - lastEncoderPos;
+    lastEncoderPos = encPos;
+
+    if (inMenu && !editMode) {
+      int itemCount = getMenuItemCount(currentMenu);
+      menuSelection = (menuSelection + delta + itemCount) % itemCount;
+      updateDisplay();
+    } else if (editMode) {
+      switch (currentMenu) {
+        case SETTINGS_MENU:
+          if (menuSelection == 2) {  // Waveform
+            currentWaveform = (currentWaveform + delta + 4) % 4;
+            updateWaveform();
+          } else if (menuSelection == 3) {  // Output
+            useHeadphones = !useHeadphones;
+            updateOutputRouting();
+          }
+          break;
+        default:
+          break;
+      }
+      updateDisplay();
+    }
+  }
+
+  // Button handling removed – handled exclusively in handleButtons() using Bounce2 debouncer to avoid conflicts
+
   if (millis() - lastFreqUpdate > 100) {
     float newFreq = mapFloat(analogRead(FREQ_POT), 0, 1023, 300.0, 1200.0);
     if (abs(newFreq - sidetoneFreq) > 5.0) {
@@ -1066,7 +1161,8 @@ void updateControls() {
   }
 
   // Speed control from potentiometer
-  int newSpeed = map(analogRead(SPEED_POT), 0, 1023, 5, 50);
+  // int newSpeed = map(analogRead(SPEED_POT), 0, 1023, 5, 50);
+  int newSpeed = 15;
   if (abs(newSpeed - kochSpeed) > 1) {
     kochSpeed = newSpeed;
     kochEffectiveSpeed = max(5, kochSpeed * 0.6);  // Auto-adjust Farnsworth
@@ -1089,12 +1185,14 @@ void updateDisplay() {
 }
 
 void displayMenu() {
+  int cursorIndex = 0;
   switch (currentMenu) {
     case KOCH_MENU:
       display.println("KOCH TRAINING");
-      display.println("- Start Lesson");
-      display.println("- Set Lesson #");
-      display.println("- Speed Control");
+      cursorIndex = 0;
+      display.println("> Start Lesson");
+      display.println("  Set Lesson #");
+      display.println("  Speed Control");
       break;
 
     case PRACTICE_MENU:
@@ -1112,6 +1210,9 @@ void displayMenu() {
       display.printf("Vol: %.0f%%\n", volume * 100);
       display.println("Waveform: " + String(waveformNames[currentWaveform]));
       display.println("Output: " + String(useHeadphones ? "HP" : "SPK"));
+      display.println("Decoder: " + String(decoderEnabled ? "On" : "Off"));
+      display.println("Input: " + String(useExternalAudio ? "EXT" : "INT"));
+      display.println("Koch Mode: " + String(kochModeEnabled ? "On" : "Off"));
       break;
 
     case STATS_MENU:
@@ -1214,9 +1315,38 @@ void resetAllStats() {
   saveSettings();
 }
 
+// Apply values from EEPROM struct to runtime globals
+void syncSettingsToGlobals() {
+  sidetoneFreq = deviceSettings.sidetoneFreq;
+  volume = deviceSettings.volume;
+  currentWaveform = deviceSettings.waveform;
+  useHeadphones = deviceSettings.useHeadphones;
+  decoderEnabled = deviceSettings.decoderEnabled;
+  useExternalAudio = deviceSettings.useExternalAudio;
+  kochModeEnabled = deviceSettings.kochModeEnabled;
+}
+
+// Copy current globals into struct before persisting
+void syncGlobalsToSettings() {
+  deviceSettings.sidetoneFreq = sidetoneFreq;
+  deviceSettings.volume = volume;
+  deviceSettings.waveform = currentWaveform;
+  deviceSettings.useHeadphones = useHeadphones;
+  deviceSettings.decoderEnabled = decoderEnabled;
+  deviceSettings.useExternalAudio = useExternalAudio;
+  deviceSettings.kochModeEnabled = kochModeEnabled;
+}
+
 void loadSettings() {
   EEPROM.get(STATS_ADDR, stats);
   EEPROM.get(KOCH_LESSON_ADDR, kochLesson);
+  EEPROM.get(SETTINGS_ADDR, deviceSettings);
+
+  // If first run, set reasonable defaults
+  if (isnan(deviceSettings.sidetoneFreq) || deviceSettings.sidetoneFreq < 100.0 || deviceSettings.sidetoneFreq > 2000.0) {
+    deviceSettings = { 600.0, 0.5, 0, true, true, false, false };
+  }
+  syncSettingsToGlobals();
 
   // Validate loaded data
   if (kochLesson < 1 || kochLesson > 40) {
@@ -1238,11 +1368,14 @@ void loadSettings() {
 }
 
 void saveSettings() {
+  syncGlobalsToSettings();
   stats.totalTrainingMinutes += (millis() - sessionStartTime) / 60000.0;
   stats.lastSessionTime = millis();
 
   EEPROM.put(STATS_ADDR, stats);
   EEPROM.put(KOCH_LESSON_ADDR, kochLesson);
+
+  EEPROM.put(SETTINGS_ADDR, deviceSettings);
 
   sessionStartTime = millis();  // Reset session timer
 }
